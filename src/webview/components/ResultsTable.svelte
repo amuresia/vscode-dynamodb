@@ -1,6 +1,7 @@
 <script lang="ts">
   import { createEventDispatcher } from "svelte";
 
+  import { buildPrimaryKeyRecord } from "../../itemKeys";
   import type { TableMetadata } from "../../types";
   import {
     formatCell,
@@ -27,10 +28,20 @@
   export let cellDrafts: Record<string, string> = {};
   export let invalidCellKeys: string[] = [];
   export let busy = false;
+  export let selectedRowKey = "";
 
   const dispatch = createEventDispatcher<{
     updateCellDraft: UpdateCellDraftDetail;
+    selectRow: { item: Record<string, unknown> };
   }>();
+
+  function getRowContext(item: Record<string, unknown>): string {
+    return JSON.stringify({
+      webviewSection: "row",
+      preventDefaultContextMenuItems: false,
+      itemKey: buildPrimaryKeyRecord(metadata, item),
+    });
+  }
 
   function getDisplayValue(
     item: Record<string, unknown>,
@@ -150,7 +161,14 @@
       <tbody>
         {#each items as item, index (`${index}`)}
           {@const rowKey = getRowKey(item, metadata)}
-          <tr class:dirty-row={isDirtyRow(rowKey)}>
+          <tr
+            class:dirty-row={isDirtyRow(rowKey)}
+            class:selected-row={rowKey === selectedRowKey}
+            data-vscode-context={getRowContext(item)}
+            on:click={() => dispatch("selectRow", { item })}
+            on:contextmenu={() => dispatch("selectRow", { item })}
+            on:focusin={() => dispatch("selectRow", { item })}
+          >
             {#each columns as column (column)}
               {@const displayValue = getDisplayValue(item, column)}
               {@const editable = isEditableCell(item, column)}
@@ -175,6 +193,11 @@
                   <input
                     class="cell-editor"
                     disabled={busy}
+                    on:keydown={(event) => {
+                      if (event.key === "Escape") {
+                        event.currentTarget.blur();
+                      }
+                    }}
                     on:input={(event) =>
                       updateCellDraft(item, column, event.currentTarget.value)}
                     size={getEditorSize(item, column)}
@@ -314,6 +337,10 @@
 
   tbody tr.dirty-row td {
     background: var(--row-dirty);
+  }
+
+  tbody tr.selected-row td {
+    background: var(--vscode-list-inactiveSelectionBackground);
   }
 
   td.dirty-cell {

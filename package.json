@@ -66,9 +66,25 @@
         "command": "dynamodb.saveTableChanges",
         "title": "Save Table Changes",
         "category": "DynamoDB"
+      },
+      {
+        "command": "dynamodb.deleteTableRow",
+        "title": "Delete Row",
+        "category": "DynamoDB"
       }
     ],
     "keybindings": [
+      {
+        "command": "dynamodb.deleteTableRow",
+        "key": "delete",
+        "mac": "backspace",
+        "when": "activeWebviewPanelId == dynamodbTableExplorer"
+      },
+      {
+        "command": "dynamodb.deleteTableRow",
+        "mac": "cmd+backspace",
+        "when": "activeWebviewPanelId == dynamodbTableExplorer"
+      },
       {
         "command": "dynamodb.executeQuery",
         "mac": "cmd+enter",
@@ -107,6 +123,17 @@
         {
           "command": "dynamodb.saveTableChanges",
           "when": "false"
+        },
+        {
+          "command": "dynamodb.deleteTableRow",
+          "when": "false"
+        }
+      ],
+      "webview/context": [
+        {
+          "command": "dynamodb.deleteTableRow",
+          "when": "webviewId == 'dynamodbTableExplorer' && webviewSection == 'row'",
+          "group": "dynamodb"
         }
       ],
       "view/title": [

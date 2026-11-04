@@ -1,4 +1,5 @@
 import {
+  DeleteItemCommand,
   DescribeTableCommand,
   ListTablesCommand,
   TransactWriteItemsCommand,
@@ -61,6 +62,12 @@ interface UpdateItemInputArgs {
   metadata: TableMetadata;
   originalItem: Record<string, unknown>;
   updatedItem: Record<string, unknown>;
+}
+
+interface DeleteItemInputArgs {
+  tableName: string;
+  metadata: TableMetadata;
+  item: Record<string, unknown>;
 }
 
 interface DynamoPageResponse {
@@ -175,6 +182,20 @@ export class DynamoService {
           ),
         ),
       input.cursor,
+    );
+  }
+
+  public async deleteItem(
+    connection: ConnectionSelection,
+    input: DeleteItemInputArgs,
+  ): Promise<void> {
+    const client = createDynamoDbClient(connection);
+
+    await client.send(
+      new DeleteItemCommand({
+        TableName: input.tableName,
+        Key: buildItemKey(input.metadata, input.item),
+      }),
     );
   }
 

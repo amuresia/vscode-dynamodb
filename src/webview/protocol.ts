@@ -31,6 +31,10 @@ export type WebviewToExtensionMessage =
         originalItem: Record<string, unknown>;
         updatedItem: Record<string, unknown>;
       }[];
+    }
+  | {
+      type: "deleteItem";
+      itemKey: Record<string, unknown>;
     };
 
 export type ExtensionToWebviewMessage =
@@ -43,6 +47,9 @@ export type ExtensionToWebviewMessage =
     }
   | {
       type: "saveRequested";
+    }
+  | {
+      type: "deleteRequested";
     }
   | {
       type: "results";
@@ -60,4 +67,8 @@ export type ExtensionToWebviewMessage =
         originalItem: Record<string, unknown>;
         item: Record<string, unknown>;
       }[];
+    }
+  | {
+      type: "itemDeleted";
+      item: Record<string, unknown>;
     };

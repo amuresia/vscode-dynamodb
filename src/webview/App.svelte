@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
 
+  import { buildPrimaryKeyRecord } from "../itemKeys";
   import type { DynamoCursor, ExplorerMode, KeyMetadata } from "../types";
   import ResultsTable from "./components/ResultsTable.svelte";
   import {
@@ -71,6 +72,7 @@
   let requestError = "";
   let lastQuery: QueryRequest | undefined;
   let pendingPageIndex: number | undefined;
+  let selectedRowKey = "";
   let originalRowsByKey: Record<string, Record<string, unknown>> = {};
   let editedRowsByKey: Record<string, Record<string, unknown>> = {};
   let dirtyColumnsByRowKey: Record<string, string[]> = {};
@@ -155,6 +157,13 @@
           if (message.items.length > 0) {
             showSavedMessage();
           }
+          return;
+        case "itemDeleted":
+          applyDeletedItem(message.item);
+          requestError = "";
+          return;
+        case "deleteRequested":
+          deleteSelectedRow();
           return;
         case "executeRequested":
           runActiveRequest();
@@ -426,6 +435,57 @@
     );
 
     clearRowEditingState(previousRowKey);
+  }
+
+  function handleSelectRow(
+    event: CustomEvent<{ item: Record<string, unknown> }>,
+  ): void {
+    selectedRowKey = getRowKey(event.detail.item, bootstrap.metadata);
+  }
+
+  function deleteSelectedRow(): void {
+    const activeElement = document.activeElement;
+    if (
+      activeElement instanceof HTMLInputElement ||
+      activeElement instanceof HTMLTextAreaElement
+    ) {
+      return;
+    }
+
+    const selectedItem = items.find(
+      (candidate) =>
+        getRowKey(candidate, bootstrap.metadata) === selectedRowKey,
+    );
+    if (!selectedItem) {
+      return;
+    }
+
+    requestError = "";
+    clearSavedMessage();
+    postMessage({
+      type: "deleteItem",
+      itemKey: buildPrimaryKeyRecord(
+        bootstrap.metadata,
+        originalRowsByKey[selectedRowKey] ?? selectedItem,
+      ),
+    });
+  }
+
+  function applyDeletedItem(item: Record<string, unknown>): void {
+    const deletedRowKey = getRowKey(item, bootstrap.metadata);
+    if (selectedRowKey === deletedRowKey) {
+      selectedRowKey = "";
+    }
+
+    pages = pages.map((page) => ({
+      ...page,
+      items: page.items.filter(
+        (candidate) =>
+          getRowKey(candidate, bootstrap.metadata) !== deletedRowKey,
+      ),
+    }));
+
+    clearRowEditingState(deletedRowKey);
   }
 
   function clearRowEditingState(rowKey: string): void {
@@ -759,7 +819,9 @@
           {editedRowsByKey}
           {cellDrafts}
           {invalidCellKeys}
+          {selectedRowKey}
           on:updateCellDraft={handleUpdateCellDraft}
+          on:selectRow={handleSelectRow}
         />
       {:else}
         <div class="empty-state">
