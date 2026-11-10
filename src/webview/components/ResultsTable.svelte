@@ -1,7 +1,7 @@
 <script lang="ts">
   import { createEventDispatcher } from "svelte";
 
-  import { buildPrimaryKeyRecord } from "../../itemKeys";
+  import { buildPrimaryKeyRecord, supportsItemDelete } from "../../itemKeys";
   import type { TableMetadata } from "../../types";
   import {
     formatCell,
@@ -9,6 +9,7 @@
     getCellKey,
     getRowKey,
     hasOwnColumn,
+    isDeleteRowShortcut,
     isPartitionKeyColumn,
   } from "../editing";
 
@@ -22,6 +23,7 @@
   export let columnMinWidths: Record<string, string> = {};
   export let items: Record<string, unknown>[];
   export let metadata: TableMetadata;
+  export let panelId: string;
   export let dirtyRows: string[] = [];
   export let dirtyColumnsByRowKey: Record<string, string[]> = {};
   export let editedRowsByKey: Record<string, Record<string, unknown>> = {};
@@ -33,14 +35,40 @@
   const dispatch = createEventDispatcher<{
     updateCellDraft: UpdateCellDraftDetail;
     selectRow: { item: Record<string, unknown> };
+    deleteRow: { item: Record<string, unknown> };
   }>();
 
-  function getRowContext(item: Record<string, unknown>): string {
+  const isMac = /mac/iu.test(navigator.platform);
+
+  // Tables with binary keys get no row context, which hides the Delete Row
+  // menu entry: such keys do not survive the trip to the extension host.
+  function getRowContext(item: Record<string, unknown>): string | undefined {
+    if (!supportsItemDelete(metadata)) {
+      return undefined;
+    }
+
     return JSON.stringify({
       webviewSection: "row",
-      preventDefaultContextMenuItems: false,
+      panelId,
       itemKey: buildPrimaryKeyRecord(metadata, item),
     });
+  }
+
+  // Only reacts when the row itself has focus, never a cell editor inside it.
+  function handleRowKeydown(
+    event: KeyboardEvent,
+    item: Record<string, unknown>,
+  ): void {
+    if (
+      event.target !== event.currentTarget ||
+      busy ||
+      !isDeleteRowShortcut(event, isMac)
+    ) {
+      return;
+    }
+
+    event.preventDefault();
+    dispatch("deleteRow", { item });
   }
 
   function getDisplayValue(
@@ -164,7 +192,11 @@
           <tr
             class:dirty-row={isDirtyRow(rowKey)}
             class:selected-row={rowKey === selectedRowKey}
+            aria-selected={rowKey === selectedRowKey}
+            data-row-key={rowKey}
             data-vscode-context={getRowContext(item)}
+            tabindex="0"
+            on:keydown={(event) => handleRowKeydown(event, item)}
             on:click={() => dispatch("selectRow", { item })}
             on:contextmenu={() => dispatch("selectRow", { item })}
             on:focusin={() => dispatch("selectRow", { item })}
@@ -195,7 +227,8 @@
                     disabled={busy}
                     on:keydown={(event) => {
                       if (event.key === "Escape") {
-                        event.currentTarget.blur();
+                        // Hand focus to the row so it stays keyboard-reachable.
+                        event.currentTarget.closest("tr")?.focus();
                       }
                     }}
                     on:input={(event) =>
@@ -257,6 +290,14 @@
       in srgb,
       var(--vscode-editor-background) 72%,
       var(--vscode-inputValidation-errorBackground, #7f1d1d) 28%
+    );
+    --row-selected: var(
+      --vscode-list-inactiveSelectionBackground,
+      color-mix(
+        in srgb,
+        var(--vscode-editor-background) 80%,
+        var(--vscode-editor-foreground) 20%
+      )
     );
     flex: 1 1 auto;
     width: 100%;
@@ -340,7 +381,13 @@
   }
 
   tbody tr.selected-row td {
-    background: var(--vscode-list-inactiveSelectionBackground);
+    background: var(--row-selected);
+  }
+
+  tbody tr:focus-visible {
+    outline: 1px solid
+      var(--vscode-focusBorder, var(--vscode-button-background));
+    outline-offset: -1px;
   }
 
   td.dirty-cell {

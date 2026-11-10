@@ -1,12 +1,18 @@
+import { randomUUID } from "node:crypto";
+
 import * as vscode from "vscode";
 
-import { DynamoService, getErrorMessage } from "../aws/dynamoService";
+import {
+  buildDeleteItemInput,
+  DynamoService,
+  getErrorMessage,
+} from "../aws/dynamoService";
 import type {
   ConnectionSelection,
   DynamoCursor,
   TableMetadata,
 } from "../types";
-import { buildPrimaryKeyRecord } from "../itemKeys";
+import { buildPrimaryKeyRecord, describeItemKey } from "../itemKeys";
 import { getTableExplorerHtml } from "./html";
 import type {
   ExplorerBootstrap,
@@ -76,15 +82,20 @@ export class TableExplorerPanel implements vscode.Disposable {
     });
   }
 
-  public static async deleteItemForActivePanel(
-    itemKey: Record<string, unknown>,
+  // Context-menu deletes carry the id of the panel whose row was clicked, so
+  // the key can never be applied to a different table's panel.
+  public static async deleteItemForPanel(
+    panelId: unknown,
+    itemKey: unknown,
   ): Promise<boolean> {
-    const activePanel = TableExplorerPanel.activePanel;
-    if (!activePanel || !activePanel.panel.active) {
+    const targetPanel = [...TableExplorerPanel.panels.values()].find(
+      (candidate) => candidate.panelId === panelId,
+    );
+    if (!targetPanel) {
       return false;
     }
 
-    await activePanel.confirmAndDeleteItem(itemKey);
+    await targetPanel.confirmAndDeleteItem(itemKey);
     return true;
   }
 
@@ -103,6 +114,10 @@ export class TableExplorerPanel implements vscode.Disposable {
     return true;
   }
 
+  private readonly panelId = randomUUID();
+  private loading = false;
+  private deleteInProgress = false;
+
   private constructor(
     private readonly panelKey: string,
     private readonly panel: vscode.WebviewPanel,
@@ -113,6 +128,7 @@ export class TableExplorerPanel implements vscode.Disposable {
     private readonly pageSize: number,
   ) {
     const bootstrap: ExplorerBootstrap = {
+      panelId: this.panelId,
       pageSize,
       metadata,
     };
@@ -159,45 +175,73 @@ export class TableExplorerPanel implements vscode.Disposable {
     }
   }
 
-  private async confirmAndDeleteItem(
-    item: Record<string, unknown>,
-  ): Promise<void> {
-    const keyDescription = Object.entries(
-      buildPrimaryKeyRecord(this.metadata, item),
-    )
-      .map(([name, value]) => `${name}: ${String(value)}`)
-      .join(", ");
-    const confirmLabel = "Delete";
-    const choice = await vscode.window.showWarningMessage(
-      `Delete item from "${this.metadata.tableName}"?`,
-      {
-        modal: true,
-        detail: `${keyDescription}\n\nThis permanently deletes the item in ${this.connection.profile} (${this.connection.region}) and cannot be undone.`,
-      },
-      confirmLabel,
-    );
-
-    if (choice !== confirmLabel) {
+  private async confirmAndDeleteItem(itemKey: unknown): Promise<void> {
+    // One confirmation per panel, and never on top of a running request.
+    if (this.deleteInProgress || this.loading) {
       return;
     }
 
-    await this.withLoading(async () => {
-      await this.service.deleteItem(this.connection, {
-        tableName: this.metadata.tableName,
-        metadata: this.metadata,
-        item,
-      });
-      this.postMessage({
-        type: "itemDeleted",
-        item,
-      });
-    });
+    this.deleteInProgress = true;
+    try {
+      let key: Record<string, unknown>;
+      try {
+        // Throws for malformed, mistyped, lossy or binary keys.
+        buildDeleteItemInput({
+          tableName: this.metadata.tableName,
+          metadata: this.metadata,
+          itemKey,
+        });
+        key = buildPrimaryKeyRecord(
+          this.metadata,
+          itemKey as Record<string, unknown>,
+        );
+      } catch (error) {
+        this.postMessage({
+          type: "error",
+          message: getErrorMessage(error),
+        });
+        return;
+      }
+
+      const confirmLabel = "Delete";
+      const choice = await vscode.window.showWarningMessage(
+        `Delete item from "${this.metadata.tableName}"?`,
+        {
+          modal: true,
+          detail: `${describeItemKey(this.metadata, key)}\n\nThis permanently deletes the item in ${this.connection.profile} (${this.connection.region}) and cannot be undone.`,
+        },
+        confirmLabel,
+      );
+
+      if (choice !== confirmLabel) {
+        return;
+      }
+
+      await this.withLoading(async () => {
+        await this.service.deleteItem(this.connection, {
+          tableName: this.metadata.tableName,
+          metadata: this.metadata,
+          itemKey: key,
+        });
+        this.postMessage({
+          type: "itemDeleted",
+          itemKey: key,
+        });
+      }, "delete");
+    } finally {
+      this.deleteInProgress = false;
+    }
   }
 
-  private async withLoading(action: () => Promise<void>): Promise<void> {
+  private async withLoading(
+    action: () => Promise<void>,
+    busyAction?: "delete",
+  ): Promise<void> {
+    this.loading = true;
     this.postMessage({
       type: "setLoading",
       loading: true,
+      action: busyAction,
     });
 
     try {
@@ -212,6 +256,7 @@ export class TableExplorerPanel implements vscode.Disposable {
         message: getErrorMessage(error),
       });
     } finally {
+      this.loading = false;
       this.postMessage({
         type: "setLoading",
         loading: false,

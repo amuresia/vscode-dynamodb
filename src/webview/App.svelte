@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
 
-  import { buildPrimaryKeyRecord } from "../itemKeys";
+  import { buildPrimaryKeyRecord, supportsItemDelete } from "../itemKeys";
   import type { DynamoCursor, ExplorerMode, KeyMetadata } from "../types";
   import ResultsTable from "./components/ResultsTable.svelte";
   import {
@@ -50,7 +50,7 @@
   type QueryRequest = QueryRequestScan | QueryRequestIndex | QueryRequestTable;
   type QueryDefinition = QueryRequestIndex | QueryRequestTable;
   type QueryTarget = QueryDefinition["target"];
-  type BusyAction = "query" | "save" | undefined;
+  type BusyAction = "query" | "save" | "delete" | undefined;
 
   interface VsCodeApi {
     postMessage(message: WebviewToExtensionMessage): void;
@@ -117,9 +117,11 @@
   $: busyLabel =
     busyAction === "save" && loading
       ? "Saving..."
-      : loading
-        ? "Running..."
-        : "";
+      : busyAction === "delete" && loading
+        ? "Deleting..."
+        : loading
+          ? "Running..."
+          : "";
   $: validationError =
     invalidCellKeys.length > 0 ? invalidCells[invalidCellKeys[0]] : "";
   $: error = validationError || requestError;
@@ -135,6 +137,8 @@
           loading = message.loading;
           if (!message.loading) {
             busyAction = undefined;
+          } else if (message.action) {
+            busyAction = message.action;
           }
           return;
         case "error":
@@ -159,11 +163,11 @@
           }
           return;
         case "itemDeleted":
-          applyDeletedItem(message.item);
+          applyDeletedItem(message.itemKey);
           requestError = "";
           return;
         case "deleteRequested":
-          deleteSelectedRow();
+          deleteFocusedRow();
           return;
         case "executeRequested":
           runActiveRequest();
@@ -443,36 +447,55 @@
     selectedRowKey = getRowKey(event.detail.item, bootstrap.metadata);
   }
 
-  function deleteSelectedRow(): void {
+  function handleDeleteRow(
+    event: CustomEvent<{ item: Record<string, unknown> }>,
+  ): void {
+    requestDeleteRow(event.detail.item);
+  }
+
+  // Serves the dynamodb.deleteTableRow command when it is run without a row
+  // (e.g. from a user-defined keybinding): only a focused table row counts.
+  function deleteFocusedRow(): void {
     const activeElement = document.activeElement;
     if (
-      activeElement instanceof HTMLInputElement ||
-      activeElement instanceof HTMLTextAreaElement
+      !document.hasFocus() ||
+      !(activeElement instanceof HTMLTableRowElement) ||
+      activeElement.dataset.rowKey === undefined
     ) {
       return;
     }
 
-    const selectedItem = items.find(
+    const focusedItem = items.find(
       (candidate) =>
-        getRowKey(candidate, bootstrap.metadata) === selectedRowKey,
+        getRowKey(candidate, bootstrap.metadata) ===
+        activeElement.dataset.rowKey,
     );
-    if (!selectedItem) {
+    if (focusedItem) {
+      requestDeleteRow(focusedItem);
+    }
+  }
+
+  function requestDeleteRow(item: Record<string, unknown>): void {
+    if (loading) {
+      return;
+    }
+
+    clearSavedMessage();
+    if (!supportsItemDelete(bootstrap.metadata)) {
+      requestError =
+        "Deleting items from tables with binary keys is not supported.";
       return;
     }
 
     requestError = "";
-    clearSavedMessage();
     postMessage({
       type: "deleteItem",
-      itemKey: buildPrimaryKeyRecord(
-        bootstrap.metadata,
-        originalRowsByKey[selectedRowKey] ?? selectedItem,
-      ),
+      itemKey: buildPrimaryKeyRecord(bootstrap.metadata, item),
     });
   }
 
-  function applyDeletedItem(item: Record<string, unknown>): void {
-    const deletedRowKey = getRowKey(item, bootstrap.metadata);
+  function applyDeletedItem(itemKey: Record<string, unknown>): void {
+    const deletedRowKey = getRowKey(itemKey, bootstrap.metadata);
     if (selectedRowKey === deletedRowKey) {
       selectedRowKey = "";
     }
@@ -484,8 +507,29 @@
           getRowKey(candidate, bootstrap.metadata) !== deletedRowKey,
       ),
     }));
+    dropEmptyPage();
 
     clearRowEditingState(deletedRowKey);
+  }
+
+  // A page emptied by a delete is removed so the pager does not land on a
+  // blank page. Its cursor moves to the previous page to keep paging intact;
+  // a sole remaining page is kept because it holds the only cursor.
+  function dropEmptyPage(): void {
+    const emptyIndex = pages.findIndex((page) => page.items.length === 0);
+    if (emptyIndex === -1 || pages.length === 1) {
+      return;
+    }
+
+    const nextCursor = pages[emptyIndex].nextCursor;
+    pages = pages
+      .filter((_page, index) => index !== emptyIndex)
+      .map((page, index) =>
+        index === emptyIndex - 1 ? { ...page, nextCursor } : page,
+      );
+    if (currentPageIndex >= emptyIndex && currentPageIndex > 0) {
+      currentPageIndex -= 1;
+    }
   }
 
   function clearRowEditingState(rowKey: string): void {
@@ -509,6 +553,7 @@
     pages = [];
     currentPageIndex = 0;
     pendingPageIndex = undefined;
+    selectedRowKey = "";
     clearEditingState();
     requestError = "";
   }
@@ -813,6 +858,7 @@
           {columnMinWidths}
           {items}
           metadata={bootstrap.metadata}
+          panelId={bootstrap.panelId}
           busy={loading}
           dirtyRows={dirtyRowKeys}
           {dirtyColumnsByRowKey}
@@ -822,6 +868,7 @@
           {selectedRowKey}
           on:updateCellDraft={handleUpdateCellDraft}
           on:selectRow={handleSelectRow}
+          on:deleteRow={handleDeleteRow}
         />
       {:else}
         <div class="empty-state">

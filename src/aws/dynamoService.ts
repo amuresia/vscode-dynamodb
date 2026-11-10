@@ -1,5 +1,7 @@
 import {
+  ConditionalCheckFailedException,
   DeleteItemCommand,
+  type DeleteItemCommandInput,
   DescribeTableCommand,
   ListTablesCommand,
   TransactWriteItemsCommand,
@@ -24,7 +26,12 @@ import type {
   TableMetadata,
   TableSummary,
 } from "../types";
-import { buildPrimaryKeyRecord, getPrimaryKeys } from "../itemKeys";
+import {
+  buildPrimaryKeyRecord,
+  getPrimaryKeys,
+  isPlainObject,
+  supportsItemDelete,
+} from "../itemKeys";
 import { areValuesEqual } from "../valueEquality";
 import { createDynamoDbClient } from "./dynamoClient";
 
@@ -67,7 +74,7 @@ interface UpdateItemInputArgs {
 interface DeleteItemInputArgs {
   tableName: string;
   metadata: TableMetadata;
-  item: Record<string, unknown>;
+  itemKey: unknown;
 }
 
 interface DynamoPageResponse {
@@ -191,12 +198,15 @@ export class DynamoService {
   ): Promise<void> {
     const client = createDynamoDbClient(connection);
 
-    await client.send(
-      new DeleteItemCommand({
-        TableName: input.tableName,
-        Key: buildItemKey(input.metadata, input.item),
-      }),
-    );
+    try {
+      await client.send(new DeleteItemCommand(buildDeleteItemInput(input)));
+    } catch (error) {
+      if (error instanceof ConditionalCheckFailedException) {
+        throw new Error(ITEM_NO_LONGER_EXISTS_MESSAGE);
+      }
+
+      throw error;
+    }
   }
 
   public async updateItem(
@@ -335,6 +345,43 @@ export function buildItemKey(
   item: Record<string, unknown>,
 ): Record<string, AttributeValue> {
   return marshall(buildPrimaryKeyRecord(metadata, item));
+}
+
+export const BINARY_KEY_DELETE_UNSUPPORTED_MESSAGE =
+  "Deleting items from tables with binary keys is not supported.";
+
+export const ITEM_NO_LONGER_EXISTS_MESSAGE =
+  "The item no longer exists, so nothing was deleted. Run the scan or query again to refresh the results.";
+
+export function buildDeleteItemInput({
+  tableName,
+  metadata,
+  itemKey,
+}: DeleteItemInputArgs): DeleteItemCommandInput {
+  if (!supportsItemDelete(metadata)) {
+    throw new Error(BINARY_KEY_DELETE_UNSUPPORTED_MESSAGE);
+  }
+
+  if (!isPlainObject(itemKey)) {
+    throw new Error("The item key to delete is not valid.");
+  }
+
+  const keyRecord = buildPrimaryKeyRecord(metadata, itemKey);
+
+  return {
+    TableName: tableName,
+    Key: Object.fromEntries(
+      getPrimaryKeys(metadata).map((key) => [
+        key.name,
+        toKeyAttributeValue(key, keyRecord[key.name]),
+      ]),
+    ),
+    // Without this DynamoDB reports success for a key that matches no item.
+    ConditionExpression: "attribute_exists(#pk)",
+    ExpressionAttributeNames: {
+      "#pk": metadata.partitionKey.name,
+    },
+  };
 }
 
 export function buildUpdateItemInput({
@@ -478,6 +525,43 @@ function mapTableMetadata(response: DescribeTableCommandOutput): TableMetadata {
       },
     ),
   };
+}
+
+function toKeyAttributeValue(key: KeyMetadata, value: unknown): AttributeValue {
+  switch (key.type) {
+    case "S":
+      if (typeof value !== "string") {
+        throw new Error(`Key attribute "${key.name}" must be a string.`);
+      }
+      return { S: value };
+    case "N":
+      if (typeof value === "bigint") {
+        return { N: value.toString() };
+      }
+      if (typeof value !== "number" || !Number.isFinite(value)) {
+        throw new Error(`Key attribute "${key.name}" must be a number.`);
+      }
+      if (!isExactlyRepresentableNumber(value)) {
+        throw new Error(
+          `Key attribute "${key.name}" has more precision than this extension can represent exactly, so the item cannot be deleted safely from here.`,
+        );
+      }
+      return { N: String(value) };
+    case "B":
+      throw new Error(BINARY_KEY_DELETE_UNSUPPORTED_MESSAGE);
+  }
+}
+
+// Items are read into JavaScript numbers, which keep at most 15 significant
+// decimal digits (and integers up to 2^53 - 1) exactly. A value beyond that
+// may be a rounded copy of the stored key, so it must not be used as a key.
+function isExactlyRepresentableNumber(value: number): boolean {
+  if (Number.isInteger(value)) {
+    return Number.isSafeInteger(value);
+  }
+
+  const [mantissa] = String(Math.abs(value)).split("e");
+  return mantissa.replace(".", "").replace(/^0+/u, "").length <= 15;
 }
 
 function toDocumentAttributeValue(value: unknown): AttributeValue {

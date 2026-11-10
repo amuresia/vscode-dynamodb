@@ -75,17 +75,6 @@
     ],
     "keybindings": [
       {
-        "command": "dynamodb.deleteTableRow",
-        "key": "delete",
-        "mac": "backspace",
-        "when": "activeWebviewPanelId == dynamodbTableExplorer"
-      },
-      {
-        "command": "dynamodb.deleteTableRow",
-        "mac": "cmd+backspace",
-        "when": "activeWebviewPanelId == dynamodbTableExplorer"
-      },
-      {
         "command": "dynamodb.executeQuery",
         "mac": "cmd+enter",
         "key": "ctrl+enter",

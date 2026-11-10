@@ -142,6 +142,30 @@ export function getDirtyColumns(
   });
 }
 
+interface KeyboardShortcutEvent {
+  key: string;
+  metaKey: boolean;
+  ctrlKey: boolean;
+  altKey: boolean;
+  shiftKey: boolean;
+  repeat: boolean;
+}
+
+// Delete on Windows/Linux, Cmd+Backspace on macOS. Plain Backspace is never
+// accepted, and held-down keys do not repeat the request.
+export function isDeleteRowShortcut(
+  event: KeyboardShortcutEvent,
+  isMac: boolean,
+): boolean {
+  if (event.repeat || event.ctrlKey || event.altKey || event.shiftKey) {
+    return false;
+  }
+
+  return isMac
+    ? event.key === "Backspace" && event.metaKey
+    : event.key === "Delete" && !event.metaKey;
+}
+
 export function getCellKey(rowKey: string, column: string): string {
   return `${rowKey}:${column}`;
 }
