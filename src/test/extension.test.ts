@@ -27,5 +27,6 @@ suite("Extension Test Suite", () => {
     assert.ok(commands.includes("dynamodb.openTableExplorer"));
     assert.ok(commands.includes("dynamodb.executeQuery"));
     assert.ok(commands.includes("dynamodb.saveTableChanges"));
+    assert.ok(commands.includes("dynamodb.deleteTableRow"));
   });
 });

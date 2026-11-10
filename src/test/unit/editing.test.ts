@@ -5,6 +5,7 @@ import {
   formatEditableValue,
   getDirtyColumns,
   getRowKey,
+  isDeleteRowShortcut,
   parseEditedValue,
 } from "../../webview/editing";
 
@@ -128,5 +129,49 @@ suite("Webview editing helpers", () => {
     );
 
     assert.deepStrictEqual(dirtyColumns, []);
+  });
+
+  test("matches the delete-row shortcut per platform", () => {
+    const event = {
+      key: "Delete",
+      metaKey: false,
+      ctrlKey: false,
+      altKey: false,
+      shiftKey: false,
+      repeat: false,
+    };
+
+    assert.strictEqual(isDeleteRowShortcut(event, false), true);
+    assert.strictEqual(isDeleteRowShortcut(event, true), false);
+    assert.strictEqual(
+      isDeleteRowShortcut({ ...event, key: "Backspace", metaKey: true }, true),
+      true,
+    );
+  });
+
+  test("ignores plain Backspace, modifiers and key repeat for delete-row", () => {
+    const event = {
+      key: "Backspace",
+      metaKey: false,
+      ctrlKey: false,
+      altKey: false,
+      shiftKey: false,
+      repeat: false,
+    };
+
+    assert.strictEqual(isDeleteRowShortcut(event, true), false);
+    assert.strictEqual(isDeleteRowShortcut(event, false), false);
+    assert.strictEqual(
+      isDeleteRowShortcut({ ...event, key: "Delete", shiftKey: true }, false),
+      false,
+    );
+    assert.strictEqual(
+      isDeleteRowShortcut({ ...event, key: "Delete", repeat: true }, false),
+      false,
+    );
+    assert.strictEqual(
+      isDeleteRowShortcut({ ...event, metaKey: true, repeat: true }, true),
+      false,
+    );
   });
 });
