@@ -1,12 +1,5 @@
 declare module "dynalite" {
-  import type { Server } from "node:http";
-
-  interface DynaliteOptions {
-    path?: string;
+  export default function dynalite(options?: {
     createTableMs?: number;
-    deleteTableMs?: number;
-    updateTableMs?: number;
-  }
-
-  export default function dynalite(options?: DynaliteOptions): Server;
+  }): import("node:http").Server;
 }
