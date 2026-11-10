@@ -1,7 +1,6 @@
 import type { DynamoCursor, TableMetadata } from "../types";
 
 export interface ExplorerBootstrap {
-  panelId: string;
   pageSize: number;
   metadata: TableMetadata;
 }
@@ -35,23 +34,23 @@ export type WebviewToExtensionMessage =
     }
   | {
       type: "deleteItem";
-      itemKey: unknown;
+      itemKey: Record<string, unknown>;
     };
 
 export type ExtensionToWebviewMessage =
   | {
+      type: "itemDeleted";
+      itemKey: Record<string, unknown>;
+    }
+  | {
       type: "setLoading";
       loading: boolean;
-      action?: "delete";
     }
   | {
       type: "executeRequested";
     }
   | {
       type: "saveRequested";
-    }
-  | {
-      type: "deleteRequested";
     }
   | {
       type: "results";
@@ -69,8 +68,4 @@ export type ExtensionToWebviewMessage =
         originalItem: Record<string, unknown>;
         item: Record<string, unknown>;
       }[];
-    }
-  | {
-      type: "itemDeleted";
-      itemKey: Record<string, unknown>;
     };

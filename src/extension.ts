@@ -8,14 +8,9 @@ import { ConnectionTreeProvider } from "./views/connectionTreeProvider";
 import { TableTreeProvider } from "./views/tableTreeProvider";
 import { TableExplorerPanel } from "./webview/tableExplorerPanel";
 
-// Returned from activate() only when VS Code runs the extension's tests.
-export interface ExtensionTestApi {
-  getActiveTableExplorerPanelId(): string | undefined;
-}
-
 export async function activate(
   context: vscode.ExtensionContext,
-): Promise<ExtensionTestApi | undefined> {
+): Promise<void> {
   const settings = getExtensionSettings();
   const service = new DynamoService();
   const sessionState = new SessionState(
@@ -248,23 +243,10 @@ export async function activate(
     }),
     vscode.commands.registerCommand(
       "dynamodb.deleteTableRow",
-      async (context?: { panelId?: unknown; itemKey?: unknown }) => {
-        if (context?.itemKey !== undefined) {
-          if (
-            await TableExplorerPanel.deleteItemForPanel(
-              context.panelId,
-              context.itemKey,
-            )
-          ) {
-            return;
-          }
-        } else if (TableExplorerPanel.requestDeleteForActivePanel()) {
-          return;
+      async (context?: { itemKey?: Record<string, unknown> }) => {
+        if (context?.itemKey) {
+          await TableExplorerPanel.deleteItemForActivePanel(context.itemKey);
         }
-
-        void vscode.window.showWarningMessage(
-          "Select a row in a DynamoDB table explorer to delete it.",
-        );
       },
     ),
     vscode.commands.registerCommand("dynamodb.saveTableChanges", async () => {
@@ -288,15 +270,6 @@ export async function activate(
     tablesTreeView.message = undefined;
   }
   await refreshTables(false);
-
-  if (context.extensionMode === vscode.ExtensionMode.Test) {
-    return {
-      getActiveTableExplorerPanelId: () =>
-        TableExplorerPanel.getActivePanelId(),
-    };
-  }
-
-  return undefined;
 }
 
 export function deactivate(): void {}

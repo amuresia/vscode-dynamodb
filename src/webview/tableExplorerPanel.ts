@@ -1,5 +1,3 @@
-import { randomUUID } from "node:crypto";
-
 import * as vscode from "vscode";
 
 import {
@@ -7,12 +5,12 @@ import {
   DynamoService,
   getErrorMessage,
 } from "../aws/dynamoService";
+import { getPrimaryKeys } from "../itemKeys";
 import type {
   ConnectionSelection,
   DynamoCursor,
   TableMetadata,
 } from "../types";
-import { buildPrimaryKeyRecord, describeItemKey } from "../itemKeys";
 import { getTableExplorerHtml } from "./html";
 import type {
   ExplorerBootstrap,
@@ -64,8 +62,11 @@ export class TableExplorerPanel implements vscode.Disposable {
     TableExplorerPanel.activePanel = explorerPanel;
   }
 
-  public static getActivePanelId(): string | undefined {
-    return TableExplorerPanel.activePanel?.panelId;
+  public static async deleteItemForActivePanel(
+    itemKey: Record<string, unknown>,
+  ): Promise<void> {
+    const panel = TableExplorerPanel.activePanel;
+    await panel?.withLoading(async () => panel.deleteItem(itemKey));
   }
 
   public static requestSaveForActivePanel(): boolean {
@@ -80,33 +81,10 @@ export class TableExplorerPanel implements vscode.Disposable {
     });
   }
 
-  public static requestDeleteForActivePanel(): boolean {
-    return TableExplorerPanel.requestForActivePanel({
-      type: "deleteRequested",
-    });
-  }
-
-  // Context-menu deletes carry the id of the panel whose row was clicked, so
-  // the key can never be applied to a different table's panel.
-  public static async deleteItemForPanel(
-    panelId: unknown,
-    itemKey: unknown,
-  ): Promise<boolean> {
-    const targetPanel = [...TableExplorerPanel.panels.values()].find(
-      (candidate) => candidate.panelId === panelId,
-    );
-    if (!targetPanel) {
-      return false;
-    }
-
-    await targetPanel.confirmAndDeleteItem(itemKey);
-    return true;
-  }
-
   private static requestForActivePanel(
     message: Extract<
       ExtensionToWebviewMessage,
-      { type: "executeRequested" | "saveRequested" | "deleteRequested" }
+      { type: "executeRequested" | "saveRequested" }
     >,
   ): boolean {
     const activePanel = TableExplorerPanel.activePanel;
@@ -118,10 +96,6 @@ export class TableExplorerPanel implements vscode.Disposable {
     return true;
   }
 
-  private readonly panelId = randomUUID();
-  private loading = false;
-  private deleteInProgress = false;
-
   private constructor(
     private readonly panelKey: string,
     private readonly panel: vscode.WebviewPanel,
@@ -132,7 +106,6 @@ export class TableExplorerPanel implements vscode.Disposable {
     private readonly pageSize: number,
   ) {
     const bootstrap: ExplorerBootstrap = {
-      panelId: this.panelId,
       pageSize,
       metadata,
     };
@@ -169,7 +142,7 @@ export class TableExplorerPanel implements vscode.Disposable {
         await this.withLoading(async () => this.saveItems(message.items));
         return;
       case "deleteItem":
-        await this.confirmAndDeleteItem(message.itemKey);
+        await this.withLoading(async () => this.deleteItem(message.itemKey));
         return;
       case "runScan":
         await this.withLoading(async () => this.runScan(message.cursor));
@@ -179,73 +152,10 @@ export class TableExplorerPanel implements vscode.Disposable {
     }
   }
 
-  private async confirmAndDeleteItem(itemKey: unknown): Promise<void> {
-    // One confirmation per panel, and never on top of a running request.
-    if (this.deleteInProgress || this.loading) {
-      return;
-    }
-
-    this.deleteInProgress = true;
-    try {
-      let key: Record<string, unknown>;
-      try {
-        // Throws for malformed, mistyped, lossy or binary keys.
-        buildDeleteItemInput({
-          tableName: this.metadata.tableName,
-          metadata: this.metadata,
-          itemKey,
-        });
-        key = buildPrimaryKeyRecord(
-          this.metadata,
-          itemKey as Record<string, unknown>,
-        );
-      } catch (error) {
-        this.postMessage({
-          type: "error",
-          message: getErrorMessage(error),
-        });
-        return;
-      }
-
-      const confirmLabel = "Delete";
-      const choice = await vscode.window.showWarningMessage(
-        `Delete item from "${this.metadata.tableName}"?`,
-        {
-          modal: true,
-          detail: `${describeItemKey(this.metadata, key)}\n\nThis permanently deletes the item in ${this.connection.profile} (${this.connection.region}) and cannot be undone.`,
-        },
-        confirmLabel,
-      );
-
-      if (choice !== confirmLabel) {
-        return;
-      }
-
-      await this.withLoading(async () => {
-        await this.service.deleteItem(this.connection, {
-          tableName: this.metadata.tableName,
-          metadata: this.metadata,
-          itemKey: key,
-        });
-        this.postMessage({
-          type: "itemDeleted",
-          itemKey: key,
-        });
-      }, "delete");
-    } finally {
-      this.deleteInProgress = false;
-    }
-  }
-
-  private async withLoading(
-    action: () => Promise<void>,
-    busyAction?: "delete",
-  ): Promise<void> {
-    this.loading = true;
+  private async withLoading(action: () => Promise<void>): Promise<void> {
     this.postMessage({
       type: "setLoading",
       loading: true,
-      action: busyAction,
     });
 
     try {
@@ -260,7 +170,6 @@ export class TableExplorerPanel implements vscode.Disposable {
         message: getErrorMessage(error),
       });
     } finally {
-      this.loading = false;
       this.postMessage({
         type: "setLoading",
         loading: false,
@@ -344,6 +253,27 @@ export class TableExplorerPanel implements vscode.Disposable {
       items,
       cursor,
     });
+  }
+
+  private async deleteItem(itemKey: Record<string, unknown>): Promise<void> {
+    const input = buildDeleteItemInput(this.metadata, itemKey);
+    const keyText = getPrimaryKeys(this.metadata)
+      .map((key) => `${key.name}: ${JSON.stringify(itemKey[key.name])}`)
+      .join(", ");
+    const choice = await vscode.window.showWarningMessage(
+      `Delete item from "${this.metadata.tableName}"?`,
+      {
+        modal: true,
+        detail: `${keyText}\n\nThis permanently deletes the item in ${this.connection.profile} (${this.connection.region}) and cannot be undone.`,
+      },
+      "Delete",
+    );
+    if (choice !== "Delete") {
+      return;
+    }
+
+    await this.service.deleteItem(this.connection, input);
+    this.postMessage({ type: "itemDeleted", itemKey });
   }
 
   private async saveItems(

@@ -26,12 +26,7 @@ import type {
   TableMetadata,
   TableSummary,
 } from "../types";
-import {
-  buildPrimaryKeyRecord,
-  getPrimaryKeys,
-  isPlainObject,
-  supportsItemDelete,
-} from "../itemKeys";
+import { buildPrimaryKeyRecord, getPrimaryKeys } from "../itemKeys";
 import { areValuesEqual } from "../valueEquality";
 import { createDynamoDbClient } from "./dynamoClient";
 
@@ -69,12 +64,6 @@ interface UpdateItemInputArgs {
   metadata: TableMetadata;
   originalItem: Record<string, unknown>;
   updatedItem: Record<string, unknown>;
-}
-
-interface DeleteItemInputArgs {
-  tableName: string;
-  metadata: TableMetadata;
-  itemKey: unknown;
 }
 
 interface DynamoPageResponse {
@@ -194,17 +183,14 @@ export class DynamoService {
 
   public async deleteItem(
     connection: ConnectionSelection,
-    input: DeleteItemInputArgs,
+    input: DeleteItemCommandInput,
   ): Promise<void> {
-    const client = createDynamoDbClient(connection);
-
     try {
-      await client.send(new DeleteItemCommand(buildDeleteItemInput(input)));
+      await createDynamoDbClient(connection).send(new DeleteItemCommand(input));
     } catch (error) {
       if (error instanceof ConditionalCheckFailedException) {
-        throw new Error(ITEM_NO_LONGER_EXISTS_MESSAGE);
+        throw new Error("The item no longer exists; nothing was deleted.");
       }
-
       throw error;
     }
   }
@@ -347,40 +333,43 @@ export function buildItemKey(
   return marshall(buildPrimaryKeyRecord(metadata, item));
 }
 
-export const BINARY_KEY_DELETE_UNSUPPORTED_MESSAGE =
-  "Deleting items from tables with binary keys is not supported.";
-
-export const ITEM_NO_LONGER_EXISTS_MESSAGE =
-  "The item no longer exists, so nothing was deleted. Run the scan or query again to refresh the results.";
-
-export function buildDeleteItemInput({
-  tableName,
-  metadata,
-  itemKey,
-}: DeleteItemInputArgs): DeleteItemCommandInput {
-  if (!supportsItemDelete(metadata)) {
-    throw new Error(BINARY_KEY_DELETE_UNSUPPORTED_MESSAGE);
-  }
-
-  if (!isPlainObject(itemKey)) {
-    throw new Error("The item key to delete is not valid.");
-  }
-
-  const keyRecord = buildPrimaryKeyRecord(metadata, itemKey);
+// The existence condition makes a delete of a missing item fail instead of
+// silently succeeding. Keys that cannot be sent back exactly are refused:
+// binary keys, and numbers beyond what a JavaScript number holds exactly.
+export function buildDeleteItemInput(
+  metadata: TableMetadata,
+  itemKey: Record<string, unknown>,
+): DeleteItemCommandInput {
+  const toKeyValue = (key: KeyMetadata): AttributeValue => {
+    const value = itemKey[key.name];
+    if (key.type === "S" && typeof value === "string") {
+      return { S: value };
+    }
+    if (key.type === "N" && typeof value === "number") {
+      const digits = String(value).replace(/e.*$|[-.]/gu, "");
+      if (
+        Number.isSafeInteger(value) ||
+        (Number.isFinite(value) &&
+          !Number.isInteger(value) &&
+          digits.replace(/^0+/u, "").length <= 15)
+      ) {
+        return { N: String(value) };
+      }
+    }
+    throw new Error(
+      key.type === "B"
+        ? "Deleting items with binary keys is not supported."
+        : `Key "${key.name}" cannot be sent back exactly, so the item cannot be deleted from here.`,
+    );
+  };
 
   return {
-    TableName: tableName,
+    TableName: metadata.tableName,
     Key: Object.fromEntries(
-      getPrimaryKeys(metadata).map((key) => [
-        key.name,
-        toKeyAttributeValue(key, keyRecord[key.name]),
-      ]),
+      getPrimaryKeys(metadata).map((key) => [key.name, toKeyValue(key)]),
     ),
-    // Without this DynamoDB reports success for a key that matches no item.
     ConditionExpression: "attribute_exists(#pk)",
-    ExpressionAttributeNames: {
-      "#pk": metadata.partitionKey.name,
-    },
+    ExpressionAttributeNames: { "#pk": metadata.partitionKey.name },
   };
 }
 
@@ -525,43 +514,6 @@ function mapTableMetadata(response: DescribeTableCommandOutput): TableMetadata {
       },
     ),
   };
-}
-
-function toKeyAttributeValue(key: KeyMetadata, value: unknown): AttributeValue {
-  switch (key.type) {
-    case "S":
-      if (typeof value !== "string") {
-        throw new Error(`Key attribute "${key.name}" must be a string.`);
-      }
-      return { S: value };
-    case "N":
-      if (typeof value === "bigint") {
-        return { N: value.toString() };
-      }
-      if (typeof value !== "number" || !Number.isFinite(value)) {
-        throw new Error(`Key attribute "${key.name}" must be a number.`);
-      }
-      if (!isExactlyRepresentableNumber(value)) {
-        throw new Error(
-          `Key attribute "${key.name}" has more precision than this extension can represent exactly, so the item cannot be deleted safely from here.`,
-        );
-      }
-      return { N: String(value) };
-    case "B":
-      throw new Error(BINARY_KEY_DELETE_UNSUPPORTED_MESSAGE);
-  }
-}
-
-// Items are read into JavaScript numbers, which keep at most 15 significant
-// decimal digits (and integers up to 2^53 - 1) exactly. A value beyond that
-// may be a rounded copy of the stored key, so it must not be used as a key.
-function isExactlyRepresentableNumber(value: number): boolean {
-  if (Number.isInteger(value)) {
-    return Number.isSafeInteger(value);
-  }
-
-  const [mantissa] = String(Math.abs(value)).split("e");
-  return mantissa.replace(".", "").replace(/^0+/u, "").length <= 15;
 }
 
 function toDocumentAttributeValue(value: unknown): AttributeValue {
