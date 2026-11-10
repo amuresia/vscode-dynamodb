@@ -12,8 +12,9 @@ import {
 import dynalite from "dynalite";
 import * as vscode from "vscode";
 
-import { buildDeleteItemInput, DynamoService } from "../../aws/dynamoService";
-import type { ScalarKeyType, TableMetadata } from "../../types";
+import { DynamoService } from "../../aws/dynamoService";
+import type { ScalarKeyType } from "../../types";
+import { saveChanges } from "../../webview/tableExplorerPanel";
 
 type Key = [name: string, type: ScalarKeyType];
 type RawItem = Record<string, AttributeValue>;
@@ -25,18 +26,25 @@ suite("Delete row against a local DynamoDB", function () {
   this.timeout(30_000);
 
   const connection = { profile: "local", region: "us-east-1" };
-  const realShowWarningMessage = vscode.window.showWarningMessage;
+  const service = new DynamoService();
   let server: Server;
   let client: DynamoDBClient;
   let deleteRequests = 0;
-  let confirm = true;
-  let dialogs = 0;
+  let openScans = 0;
+  let finishedScans = 0;
 
   suiteSetup(async () => {
     server = dynalite({ createTableMs: 0 });
-    server.on("request", (request) => {
-      if (String(request.headers["x-amz-target"]).endsWith("DeleteItem")) {
+    server.on("request", (request, response) => {
+      const operation = String(request.headers["x-amz-target"]);
+      if (operation.endsWith("DeleteItem")) {
         deleteRequests += 1;
+      } else if (operation.endsWith("Scan")) {
+        openScans += 1;
+        response.on("finish", () => {
+          openScans -= 1;
+          finishedScans += 1;
+        });
       }
     });
     await new Promise<void>((resolve) =>
@@ -49,20 +57,9 @@ suite("Delete row against a local DynamoDB", function () {
       region: connection.region,
       credentials: { accessKeyId: "local", secretAccessKey: "local" },
     });
-
-    // VS Code cannot show the modal confirmation in tests.
-    Object.assign(vscode.window, {
-      showWarningMessage: async () => {
-        dialogs += 1;
-        return confirm ? "Delete" : undefined;
-      },
-    });
   });
 
   suiteTeardown(async () => {
-    Object.assign(vscode.window, {
-      showWarningMessage: realShowWarningMessage,
-    });
     await vscode.commands.executeCommand("workbench.action.closeAllEditors");
     client.destroy();
     server.closeAllConnections();
@@ -71,8 +68,6 @@ suite("Delete row against a local DynamoDB", function () {
 
   setup(() => {
     deleteRequests = 0;
-    confirm = true;
-    dialogs = 0;
   });
 
   async function seed(
@@ -109,96 +104,145 @@ suite("Delete row against a local DynamoDB", function () {
     return Items.map((item) => JSON.stringify(item)).sort();
   }
 
-  // What the row context menu does: run the command with the row's key
-  // against the table explorer that is open for the table.
-  async function deleteRow(
-    tableName: string,
-    itemKey: Record<string, unknown>,
-  ): Promise<void> {
+  const sleep = (ms: number) =>
+    new Promise((resolve) => setTimeout(resolve, ms));
+
+  async function waitFor(condition: () => boolean | Promise<boolean>) {
+    while (!(await condition())) {
+      await sleep(50);
+    }
+  }
+
+  // Opens the real table explorer and loads its rows through the webview,
+  // which also proves the webview is up before the test sends it commands.
+  async function openExplorer(tableName: string): Promise<void> {
     await vscode.commands.executeCommand(
       "dynamodb.openTableExplorer",
       tableName,
     );
+    const scansBefore = finishedScans;
+    for (let attempt = 0; finishedScans === scansBefore; attempt += 1) {
+      if (attempt % 20 === 0) {
+        await vscode.commands.executeCommand("dynamodb.executeQuery");
+      }
+      await sleep(50);
+    }
+    await waitFor(() => openScans === 0);
+    await sleep(300);
+  }
+
+  // What the row context menu does: run the command with the row's key.
+  async function toggleDelete(itemKey: Record<string, unknown>) {
     await vscode.commands.executeCommand("dynamodb.deleteTableRow", {
       itemKey,
     });
   }
 
-  const cases: [string, Key[], RawItem[], Record<string, unknown>][] = [
-    [
-      "StringKey",
-      [["id", "S"]],
-      [{ id: { S: "a" } }, { id: { S: "b" } }, { id: { S: "1" } }],
-      { id: "b" },
-    ],
-    [
-      "NumberKey",
-      [["id", "N"]],
-      [{ id: { N: "1" } }, { id: { N: "1.5" } }, { id: { N: "-3" } }],
-      { id: 1.5 },
-    ],
-    [
-      "CompositeKey",
+  test("deletes a marked row on save (composite key)", async () => {
+    const items: RawItem[] = [
+      { tenantId: { S: "t1" }, orderId: { N: "1" } },
+      { tenantId: { S: "t1" }, orderId: { N: "2.5" }, note: { S: "target" } },
+      { tenantId: { S: "t2" }, orderId: { N: "2.5" } },
+    ];
+    await seed(
+      "MarkAndSave",
       [
         ["tenantId", "S"],
         ["orderId", "N"],
       ],
-      [
-        { tenantId: { S: "t1" }, orderId: { N: "1" } },
-        { tenantId: { S: "t1" }, orderId: { N: "2" }, note: { S: "target" } },
-        { tenantId: { S: "t2" }, orderId: { N: "2" } },
-      ],
-      { tenantId: "t1", orderId: 2 },
-    ],
-  ];
+      items,
+    );
+    await openExplorer("MarkAndSave");
 
-  for (const [tableName, keys, items, itemKey] of cases) {
-    test(`deletes only the confirmed row (${tableName})`, async () => {
-      await seed(tableName, keys, items);
+    await toggleDelete({ tenantId: "t1", orderId: 2.5 });
+    await sleep(300);
+    assert.strictEqual(deleteRequests, 0, "marking must not delete");
 
-      await deleteRow(tableName, itemKey);
+    await vscode.commands.executeCommand("dynamodb.saveTableChanges");
+    await waitFor(async () => (await remaining("MarkAndSave")).length === 2);
 
-      const kept = [items[0], items[2]];
-      assert.strictEqual(dialogs, 1);
-      assert.deepStrictEqual(
-        await remaining(tableName),
-        kept.map((item) => JSON.stringify(item)).sort(),
-      );
-    });
-  }
-
-  test("deletes nothing when the confirmation is cancelled", async () => {
-    await seed("Cancelled", [["id", "S"]], [{ id: { S: "a" } }]);
-    confirm = false;
-
-    await deleteRow("Cancelled", { id: "a" });
-
-    assert.strictEqual(dialogs, 1);
-    assert.strictEqual(deleteRequests, 0);
-    assert.strictEqual((await remaining("Cancelled")).length, 1);
+    assert.deepStrictEqual(
+      await remaining("MarkAndSave"),
+      [items[0], items[2]].map((item) => JSON.stringify(item)).sort(),
+    );
+    assert.strictEqual(deleteRequests, 1);
   });
 
-  test("fails cleanly when the item no longer exists", async () => {
-    await seed("Missing", [["id", "S"]], [{ id: { S: "a" } }]);
-    const metadata: TableMetadata = {
-      tableName: "Missing",
-      partitionKey: { name: "id", type: "S" },
-      globalSecondaryIndexes: [],
-    };
+  test("does not delete a row that was marked and then unmarked", async () => {
+    await seed(
+      "Unmark",
+      [["id", "N"]],
+      [{ id: { N: "1" } }, { id: { N: "2" } }],
+    );
+    await openExplorer("Unmark");
 
-    await assert.rejects(
-      new DynamoService().deleteItem(
-        connection,
-        buildDeleteItemInput(metadata, { id: "gone" }),
-      ),
-      /no longer exists/u,
+    await toggleDelete({ id: 1 });
+    await toggleDelete({ id: 1 });
+    await toggleDelete({ id: 2 });
+    await vscode.commands.executeCommand("dynamodb.saveTableChanges");
+    await waitFor(async () => (await remaining("Unmark")).length === 1);
+
+    assert.deepStrictEqual(await remaining("Unmark"), ['{"id":{"N":"1"}}']);
+    assert.strictEqual(deleteRequests, 1);
+  });
+
+  test("applies an edit and a delete in one save", async () => {
+    await seed(
+      "Batch",
+      [["id", "S"]],
+      [{ id: { S: "a" }, note: { S: "old" } }, { id: { S: "b" } }],
+    );
+    const metadata = await service.describeTable(connection, "Batch");
+
+    const result = await saveChanges(
+      service,
+      connection,
+      metadata,
+      [
+        {
+          originalItem: { id: "a", note: "old" },
+          updatedItem: { id: "a", note: "new" },
+        },
+      ],
+      [{ id: "b" }],
     );
 
-    assert.strictEqual(deleteRequests, 1);
-    assert.strictEqual((await remaining("Missing")).length, 1);
+    assert.deepStrictEqual(result, {
+      items: [
+        {
+          originalItem: { id: "a", note: "old" },
+          item: { id: "a", note: "new" },
+        },
+      ],
+      deletedKeys: [{ id: "b" }],
+    });
+    assert.deepStrictEqual(await remaining("Batch"), [
+      '{"id":{"S":"a"},"note":{"S":"new"}}',
+    ]);
   });
 
-  test("refuses binary and lossy number keys before asking", async () => {
+  test("reports a missing item and keeps the remaining deletes pending", async () => {
+    await seed(
+      "Missing",
+      [["id", "S"]],
+      [{ id: { S: "a" } }, { id: { S: "c" } }],
+    );
+    const metadata = await service.describeTable(connection, "Missing");
+
+    const result = await saveChanges(
+      service,
+      connection,
+      metadata,
+      [],
+      [{ id: "a" }, { id: "gone" }, { id: "c" }],
+    );
+
+    assert.deepStrictEqual(result.deletedKeys, [{ id: "a" }]);
+    assert.match(String(result.error), /no longer exists/u);
+    assert.deepStrictEqual(await remaining("Missing"), ['{"id":{"S":"c"}}']);
+  });
+
+  test("refuses binary and lossy number keys without a request", async () => {
     await seed(
       "BinaryKey",
       [["id", "B"]],
@@ -211,12 +255,22 @@ suite("Delete row against a local DynamoDB", function () {
       [{ id: { N: "0.12345678901234567891" } }],
     );
 
-    await deleteRow("BinaryKey", { id: { 0: 1, 1: 2 } });
-    await deleteRow("LossyKey", { id: 0.12345678901234568 });
+    for (const [tableName, itemKey, message] of [
+      ["BinaryKey", { id: { 0: 1, 1: 2 } }, /binary keys is not supported/u],
+      ["LossyKey", { id: 0.12345678901234568 }, /cannot be sent back exactly/u],
+    ] as const) {
+      const metadata = await service.describeTable(connection, tableName);
+      const result = await saveChanges(
+        service,
+        connection,
+        metadata,
+        [],
+        [itemKey],
+      );
 
-    assert.strictEqual(dialogs, 0);
+      assert.match(String(result.error), message);
+      assert.strictEqual((await remaining(tableName)).length, 1);
+    }
     assert.strictEqual(deleteRequests, 0);
-    assert.strictEqual((await remaining("BinaryKey")).length, 1);
-    assert.strictEqual((await remaining("LossyKey")).length, 1);
   });
 });
