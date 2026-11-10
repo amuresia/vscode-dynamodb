@@ -191,6 +191,32 @@ suite("Delete row against a local DynamoDB", function () {
     assert.strictEqual(deleteRequests, 1);
   });
 
+  test("silently drops a mark when the request is run again", async () => {
+    await seed(
+      "Rerun",
+      [["id", "S"]],
+      [{ id: { S: "a" } }, { id: { S: "b" } }],
+    );
+    await openExplorer("Rerun");
+
+    // The final run only proves the save before it was handled.
+    await toggleDelete("Rerun", { id: "a" });
+    for (const command of [
+      "executeQuery",
+      "saveTableChanges",
+      "executeQuery",
+    ]) {
+      const scansBefore = finishedScans;
+      await vscode.commands.executeCommand(`dynamodb.${command}`);
+      if (command === "executeQuery") {
+        await waitFor(() => finishedScans > scansBefore);
+      }
+    }
+
+    assert.strictEqual((await remaining("Rerun")).length, 2);
+    assert.strictEqual(deleteRequests, 0);
+  });
+
   test("applies an edit and a delete in one save", async () => {
     await seed(
       "Batch",
