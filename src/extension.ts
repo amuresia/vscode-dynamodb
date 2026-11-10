@@ -245,7 +245,7 @@ export async function activate(
       "dynamodb.deleteTableRow",
       async (context?: { itemKey?: Record<string, unknown> }) => {
         if (context?.itemKey) {
-          await TableExplorerPanel.deleteItemForActivePanel(context.itemKey);
+          TableExplorerPanel.requestDeleteForActivePanel(context.itemKey);
         }
       },
     ),

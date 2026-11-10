@@ -28,6 +28,7 @@
   export let cellDrafts: Record<string, string> = {};
   export let invalidCellKeys: string[] = [];
   export let busy = false;
+  export let deletedRows: string[] = [];
 
   const dispatch = createEventDispatcher<{
     updateCellDraft: UpdateCellDraftDetail;
@@ -173,6 +174,7 @@
           {@const rowKey = getRowKey(item, metadata)}
           <tr
             class:dirty-row={isDirtyRow(rowKey)}
+            class:deleted-row={deletedRows.includes(rowKey)}
             data-vscode-context={JSON.stringify({
               webviewSection: "row",
               itemKey: buildPrimaryKeyRecord(metadata, item),
@@ -203,7 +205,7 @@
                 {#if editable}
                   <input
                     class="cell-editor"
-                    disabled={busy}
+                    disabled={busy || deletedRows.includes(rowKey)}
                     on:input={(event) =>
                       updateCellDraft(item, column, event.currentTarget.value)}
                     size={getEditorSize(item, column)}
@@ -348,6 +350,17 @@
 
   tbody tr.dirty-row td {
     background: var(--row-dirty);
+  }
+
+  tbody tr.deleted-row td {
+    background: var(
+      --vscode-diffEditor-removedLineBackground,
+      var(--vscode-inputValidation-errorBackground)
+    );
+  }
+
+  tbody tr.deleted-row :is(.cell-value, .cell-editor) {
+    text-decoration: line-through;
   }
 
   td.dirty-cell {

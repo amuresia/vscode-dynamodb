@@ -77,6 +77,7 @@
   let dirtyColumnsByRowKey: Record<string, string[]> = {};
   let cellDrafts: Record<string, string> = {};
   let invalidCells: Record<string, string> = {};
+  let pendingDeletes: Record<string, Record<string, unknown>> = {};
   let savedMessageVisible = false;
   let savedMessageTimer: ReturnType<typeof setTimeout> | undefined;
 
@@ -110,9 +111,15 @@
     (count, rowKey) => count + dirtyColumnsByRowKey[rowKey].length,
     0,
   );
-  $: hasPendingEdits = dirtyRowKeys.length > 0 || invalidCellKeys.length > 0;
+  $: deletedRowKeys = Object.keys(pendingDeletes);
+  $: hasPendingEdits =
+    dirtyRowKeys.length > 0 ||
+    invalidCellKeys.length > 0 ||
+    deletedRowKeys.length > 0;
   $: canSave =
-    !loading && dirtyRowKeys.length > 0 && invalidCellKeys.length === 0;
+    !loading &&
+    (dirtyRowKeys.length > 0 || deletedRowKeys.length > 0) &&
+    invalidCellKeys.length === 0;
   $: busyLabel =
     busyAction === "save" && loading
       ? "Saving..."
@@ -145,8 +152,8 @@
           pendingPageIndex = undefined;
           clearEditingState();
           return;
-        case "itemDeleted":
-          applyDeletedItem(message.itemKey);
+        case "deleteRequested":
+          toggleDelete(message.itemKey);
           return;
         case "itemsSaved":
           for (const entry of message.items) {
@@ -155,8 +162,9 @@
               getRowKey(entry.originalItem, bootstrap.metadata),
             );
           }
+          message.deletedKeys.forEach(applyDeletedItem);
           requestError = "";
-          if (message.items.length > 0) {
+          if (message.items.length + message.deletedKeys.length > 0) {
             showSavedMessage();
           }
           return;
@@ -392,6 +400,7 @@
         originalItem: originalRowsByKey[rowKey],
         updatedItem: editedRowsByKey[rowKey],
       })),
+      deletes: Object.values(pendingDeletes),
     });
   }
 
@@ -432,13 +441,24 @@
     clearRowEditingState(previousRowKey);
   }
 
-  function deleteRow(
-    event: CustomEvent<{ item: Record<string, unknown> }>,
-  ): void {
-    postMessage({
-      type: "deleteItem",
-      itemKey: buildPrimaryKeyRecord(bootstrap.metadata, event.detail.item),
-    });
+  // Marks a row for deletion, or unmarks it. Nothing is deleted until save.
+  function toggleDelete(itemKey: Record<string, unknown>): void {
+    const { partitionKey, sortKey } = bootstrap.metadata;
+    const rowKey = getRowKey(itemKey, bootstrap.metadata);
+    if (loading) {
+      return;
+    }
+
+    clearSavedMessage();
+    if (rowKey in pendingDeletes) {
+      pendingDeletes = omitKey(pendingDeletes, rowKey);
+    } else if (partitionKey.type === "B" || sortKey?.type === "B") {
+      requestError = "Deleting items with binary keys is not supported.";
+    } else {
+      // The delete wins over any edits staged on the row.
+      clearRowEditingState(rowKey);
+      pendingDeletes = { ...pendingDeletes, [rowKey]: itemKey };
+    }
   }
 
   function applyDeletedItem(itemKey: Record<string, unknown>): void {
@@ -449,6 +469,7 @@
         (item) => getRowKey(item, bootstrap.metadata) !== rowKey,
       ),
     }));
+    pendingDeletes = omitKey(pendingDeletes, rowKey);
     clearRowEditingState(rowKey);
   }
 
@@ -466,6 +487,7 @@
     dirtyColumnsByRowKey = {};
     cellDrafts = {};
     invalidCells = {};
+    pendingDeletes = {};
     clearSavedMessage();
   }
 
@@ -726,10 +748,18 @@
       {#if !loading && savedMessageVisible}
         <span>Saved!</span>
       {/if}
+      {#if deletedRowKeys.length > 0}
+        <span
+          >{deletedRowKeys.length} row{deletedRowKeys.length === 1 ? "" : "s"} to
+          delete</span
+        >
+      {/if}
       {#if dirtyCellCount > 0}
         <span
           >{dirtyCellCount} field{dirtyCellCount === 1 ? "" : "s"} staged</span
         >
+      {/if}
+      {#if dirtyCellCount + deletedRowKeys.length > 0}
         <button
           class="save-link"
           disabled={!canSave}
@@ -784,7 +814,11 @@
           {cellDrafts}
           {invalidCellKeys}
           on:updateCellDraft={handleUpdateCellDraft}
-          on:deleteRow={deleteRow}
+          deletedRows={deletedRowKeys}
+          on:deleteRow={(event) =>
+            toggleDelete(
+              buildPrimaryKeyRecord(bootstrap.metadata, event.detail.item),
+            )}
         />
       {:else}
         <div class="empty-state">

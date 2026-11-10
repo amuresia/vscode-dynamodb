@@ -5,7 +5,6 @@ import {
   DynamoService,
   getErrorMessage,
 } from "../aws/dynamoService";
-import { getPrimaryKeys } from "../itemKeys";
 import type {
   ConnectionSelection,
   DynamoCursor,
@@ -17,6 +16,55 @@ import type {
   ExtensionToWebviewMessage,
   WebviewToExtensionMessage,
 } from "./protocol";
+
+interface SaveEntry {
+  originalItem: Record<string, unknown>;
+  updatedItem: Record<string, unknown>;
+}
+
+// Applies one save: the edits, then the deletes. It stops at the first
+// failure and reports what was applied before it, so the rest stays pending.
+export async function saveChanges(
+  service: DynamoService,
+  connection: ConnectionSelection,
+  metadata: TableMetadata,
+  entries: SaveEntry[],
+  deletes: Record<string, unknown>[],
+): Promise<{
+  items: {
+    originalItem: Record<string, unknown>;
+    item: Record<string, unknown>;
+  }[];
+  deletedKeys: Record<string, unknown>[];
+  error?: unknown;
+}> {
+  const items = [];
+  const deletedKeys = [];
+
+  try {
+    for (const { originalItem, updatedItem } of entries) {
+      const item = await service.updateItem(connection, {
+        tableName: metadata.tableName,
+        metadata,
+        originalItem,
+        updatedItem,
+      });
+      items.push({ originalItem, item });
+    }
+
+    for (const itemKey of deletes) {
+      await service.deleteItem(
+        connection,
+        buildDeleteItemInput(metadata, itemKey),
+      );
+      deletedKeys.push(itemKey);
+    }
+  } catch (error) {
+    return { items, deletedKeys, error };
+  }
+
+  return { items, deletedKeys };
+}
 
 export class TableExplorerPanel implements vscode.Disposable {
   private static readonly panels = new Map<string, TableExplorerPanel>();
@@ -62,11 +110,13 @@ export class TableExplorerPanel implements vscode.Disposable {
     TableExplorerPanel.activePanel = explorerPanel;
   }
 
-  public static async deleteItemForActivePanel(
+  public static requestDeleteForActivePanel(
     itemKey: Record<string, unknown>,
-  ): Promise<void> {
-    const panel = TableExplorerPanel.activePanel;
-    await panel?.withLoading(async () => panel.deleteItem(itemKey));
+  ): boolean {
+    return TableExplorerPanel.requestForActivePanel({
+      type: "deleteRequested",
+      itemKey,
+    });
   }
 
   public static requestSaveForActivePanel(): boolean {
@@ -84,7 +134,7 @@ export class TableExplorerPanel implements vscode.Disposable {
   private static requestForActivePanel(
     message: Extract<
       ExtensionToWebviewMessage,
-      { type: "executeRequested" | "saveRequested" }
+      { type: "executeRequested" | "saveRequested" | "deleteRequested" }
     >,
   ): boolean {
     const activePanel = TableExplorerPanel.activePanel;
@@ -139,10 +189,9 @@ export class TableExplorerPanel implements vscode.Disposable {
   ): Promise<void> {
     switch (message.type) {
       case "saveItems":
-        await this.withLoading(async () => this.saveItems(message.items));
-        return;
-      case "deleteItem":
-        await this.withLoading(async () => this.deleteItem(message.itemKey));
+        await this.withLoading(async () =>
+          this.saveItems(message.items, message.deletes),
+        );
         return;
       case "runScan":
         await this.withLoading(async () => this.runScan(message.cursor));
@@ -255,67 +304,22 @@ export class TableExplorerPanel implements vscode.Disposable {
     });
   }
 
-  private async deleteItem(itemKey: Record<string, unknown>): Promise<void> {
-    const input = buildDeleteItemInput(this.metadata, itemKey);
-    const keyText = getPrimaryKeys(this.metadata)
-      .map((key) => `${key.name}: ${JSON.stringify(itemKey[key.name])}`)
-      .join(", ");
-    const choice = await vscode.window.showWarningMessage(
-      `Delete item from "${this.metadata.tableName}"?`,
-      {
-        modal: true,
-        detail: `${keyText}\n\nThis permanently deletes the item in ${this.connection.profile} (${this.connection.region}) and cannot be undone.`,
-      },
-      "Delete",
-    );
-    if (choice !== "Delete") {
-      return;
-    }
-
-    await this.service.deleteItem(this.connection, input);
-    this.postMessage({ type: "itemDeleted", itemKey });
-  }
-
   private async saveItems(
-    entries: {
-      originalItem: Record<string, unknown>;
-      updatedItem: Record<string, unknown>;
-    }[],
+    entries: SaveEntry[],
+    deletes: Record<string, unknown>[],
   ): Promise<void> {
-    const savedItems: {
-      originalItem: Record<string, unknown>;
-      item: Record<string, unknown>;
-    }[] = [];
+    const { error, ...saved } = await saveChanges(
+      this.service,
+      this.connection,
+      this.metadata,
+      entries,
+      deletes,
+    );
 
-    for (const entry of entries) {
-      try {
-        const item = await this.service.updateItem(this.connection, {
-          tableName: this.metadata.tableName,
-          metadata: this.metadata,
-          originalItem: entry.originalItem,
-          updatedItem: entry.updatedItem,
-        });
-
-        savedItems.push({
-          originalItem: entry.originalItem,
-          item,
-        });
-      } catch (error) {
-        if (savedItems.length > 0) {
-          this.postMessage({
-            type: "itemsSaved",
-            items: savedItems,
-          });
-        }
-
-        throw error;
-      }
+    this.postMessage({ type: "itemsSaved", ...saved });
+    if (error) {
+      throw error;
     }
-
-    this.postMessage({
-      type: "itemsSaved",
-      items: savedItems,
-    });
   }
 
   private static getPanelKey(
