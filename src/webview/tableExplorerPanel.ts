@@ -64,6 +64,10 @@ export class TableExplorerPanel implements vscode.Disposable {
     TableExplorerPanel.activePanel = explorerPanel;
   }
 
+  public static getActivePanelId(): string | undefined {
+    return TableExplorerPanel.activePanel?.panelId;
+  }
+
   public static requestSaveForActivePanel(): boolean {
     return TableExplorerPanel.requestForActivePanel({
       type: "saveRequested",

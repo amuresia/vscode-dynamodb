@@ -8,9 +8,14 @@ import { ConnectionTreeProvider } from "./views/connectionTreeProvider";
 import { TableTreeProvider } from "./views/tableTreeProvider";
 import { TableExplorerPanel } from "./webview/tableExplorerPanel";
 
+// Returned from activate() only when VS Code runs the extension's tests.
+export interface ExtensionTestApi {
+  getActiveTableExplorerPanelId(): string | undefined;
+}
+
 export async function activate(
   context: vscode.ExtensionContext,
-): Promise<void> {
+): Promise<ExtensionTestApi | undefined> {
   const settings = getExtensionSettings();
   const service = new DynamoService();
   const sessionState = new SessionState(
@@ -283,6 +288,15 @@ export async function activate(
     tablesTreeView.message = undefined;
   }
   await refreshTables(false);
+
+  if (context.extensionMode === vscode.ExtensionMode.Test) {
+    return {
+      getActiveTableExplorerPanelId: () =>
+        TableExplorerPanel.getActivePanelId(),
+    };
+  }
+
+  return undefined;
 }
 
 export function deactivate(): void {}
