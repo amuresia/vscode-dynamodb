@@ -37,7 +37,7 @@ export type WebviewToExtensionMessage =
 export type ExtensionToWebviewMessage =
   | {
       type: "deleteRequested";
-      itemKey: Record<string, unknown>;
+      rowKey: string;
     }
   | {
       type: "setLoading";

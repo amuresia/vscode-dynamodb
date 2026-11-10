@@ -13,6 +13,7 @@ import dynalite from "dynalite";
 import * as vscode from "vscode";
 
 import { DynamoService } from "../../aws/dynamoService";
+import { buildStableRowKey } from "../../itemKeys";
 import type { ScalarKeyType } from "../../types";
 import { saveChanges } from "../../webview/tableExplorerPanel";
 
@@ -132,9 +133,13 @@ suite("Delete row against a local DynamoDB", function () {
   }
 
   // What the row context menu does: run the command with the row's key.
-  async function toggleDelete(itemKey: Record<string, unknown>) {
+  async function toggleDelete(
+    tableName: string,
+    itemKey: Record<string, unknown>,
+  ): Promise<void> {
+    const metadata = await service.describeTable(connection, tableName);
     await vscode.commands.executeCommand("dynamodb.deleteTableRow", {
-      itemKey,
+      rowKey: buildStableRowKey(metadata, itemKey),
     });
   }
 
@@ -154,7 +159,7 @@ suite("Delete row against a local DynamoDB", function () {
     );
     await openExplorer("MarkAndSave");
 
-    await toggleDelete({ tenantId: "t1", orderId: 2.5 });
+    await toggleDelete("MarkAndSave", { tenantId: "t1", orderId: 2.5 });
     await sleep(300);
     assert.strictEqual(deleteRequests, 0, "marking must not delete");
 
@@ -176,9 +181,9 @@ suite("Delete row against a local DynamoDB", function () {
     );
     await openExplorer("Unmark");
 
-    await toggleDelete({ id: 1 });
-    await toggleDelete({ id: 1 });
-    await toggleDelete({ id: 2 });
+    await toggleDelete("Unmark", { id: 1 });
+    await toggleDelete("Unmark", { id: 1 });
+    await toggleDelete("Unmark", { id: 2 });
     await vscode.commands.executeCommand("dynamodb.saveTableChanges");
     await waitFor(async () => (await remaining("Unmark")).length === 1);
 
@@ -242,35 +247,75 @@ suite("Delete row against a local DynamoDB", function () {
     assert.deepStrictEqual(await remaining("Missing"), ['{"id":{"S":"c"}}']);
   });
 
-  test("refuses binary and lossy number keys without a request", async () => {
+  test("deletes a marked row on save (composite binary key)", async () => {
+    const items: RawItem[] = [
+      { tenantId: { S: "t1" }, blobId: { B: new Uint8Array([0, 1, 255]) } },
+      { tenantId: { S: "t1" }, blobId: { B: new Uint8Array([0, 1, 254]) } },
+    ];
     await seed(
       "BinaryKey",
-      [["id", "B"]],
-      [{ id: { B: new Uint8Array([1, 2]) } }],
+      [
+        ["tenantId", "S"],
+        ["blobId", "B"],
+      ],
+      items,
     );
+    await openExplorer("BinaryKey");
+
+    await toggleDelete("BinaryKey", {
+      tenantId: "t1",
+      blobId: new Uint8Array([0, 1, 255]),
+    });
+    await vscode.commands.executeCommand("dynamodb.saveTableChanges");
+    await waitFor(async () => (await remaining("BinaryKey")).length === 1);
+
+    assert.deepStrictEqual(await remaining("BinaryKey"), [
+      JSON.stringify(items[1]),
+    ]);
+    assert.strictEqual(deleteRequests, 1);
+  });
+
+  test("saves an edit to an item with a binary key", async () => {
+    const metadata = await service.describeTable(connection, "BinaryKey");
+    const key = { tenantId: "t1", blobId: new Uint8Array([0, 1, 254]) };
+
+    const { error } = await saveChanges(
+      service,
+      connection,
+      metadata,
+      [
+        {
+          originalItem: { ...key, note: "old" },
+          updatedItem: { ...key, note: "new" },
+        },
+      ],
+      [],
+    );
+
+    assert.strictEqual(error, undefined);
+    assert.match((await remaining("BinaryKey"))[0], /"note":\{"S":"new"\}/u);
+    assert.strictEqual((await remaining("BinaryKey")).length, 1);
+  });
+
+  test("refuses lossy number keys without a request", async () => {
     // Stored with 20 digits; the explorer reads it back as a rounded double.
     await seed(
       "LossyKey",
       [["id", "N"]],
       [{ id: { N: "0.12345678901234567891" } }],
     );
+    const metadata = await service.describeTable(connection, "LossyKey");
 
-    for (const [tableName, itemKey, message] of [
-      ["BinaryKey", { id: { 0: 1, 1: 2 } }, /binary keys is not supported/u],
-      ["LossyKey", { id: 0.12345678901234568 }, /cannot be sent back exactly/u],
-    ] as const) {
-      const metadata = await service.describeTable(connection, tableName);
-      const result = await saveChanges(
-        service,
-        connection,
-        metadata,
-        [],
-        [itemKey],
-      );
+    const result = await saveChanges(
+      service,
+      connection,
+      metadata,
+      [],
+      [{ id: 0.12345678901234568 }],
+    );
 
-      assert.match(String(result.error), message);
-      assert.strictEqual((await remaining(tableName)).length, 1);
-    }
+    assert.match(String(result.error), /cannot be sent back exactly/u);
+    assert.strictEqual((await remaining("LossyKey")).length, 1);
     assert.strictEqual(deleteRequests, 0);
   });
 });

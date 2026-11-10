@@ -1,7 +1,6 @@
 <script lang="ts">
   import { createEventDispatcher } from "svelte";
 
-  import { buildPrimaryKeyRecord } from "../../itemKeys";
   import type { TableMetadata } from "../../types";
   import {
     formatCell,
@@ -177,7 +176,7 @@
             class:deleted-row={deletedRows.includes(rowKey)}
             data-vscode-context={JSON.stringify({
               webviewSection: "row",
-              itemKey: buildPrimaryKeyRecord(metadata, item),
+              rowKey,
             })}
             tabindex="0"
             on:keydown={(event) => handleRowKeydown(event, item)}

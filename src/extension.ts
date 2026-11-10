@@ -243,9 +243,9 @@ export async function activate(
     }),
     vscode.commands.registerCommand(
       "dynamodb.deleteTableRow",
-      async (context?: { itemKey?: Record<string, unknown> }) => {
-        if (context?.itemKey) {
-          TableExplorerPanel.requestDeleteForActivePanel(context.itemKey);
+      async (context?: { rowKey?: string }) => {
+        if (context?.rowKey) {
+          TableExplorerPanel.requestDeleteForActivePanel(context.rowKey);
         }
       },
     ),

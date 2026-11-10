@@ -153,7 +153,12 @@
           clearEditingState();
           return;
         case "deleteRequested":
-          toggleDelete(message.itemKey);
+          items
+            .filter(
+              (item) =>
+                getRowKey(item, bootstrap.metadata) === message.rowKey,
+            )
+            .forEach(toggleDelete);
           return;
         case "itemsSaved":
           for (const entry of message.items) {
@@ -442,9 +447,8 @@
   }
 
   // Marks a row for deletion, or unmarks it. Nothing is deleted until save.
-  function toggleDelete(itemKey: Record<string, unknown>): void {
-    const { partitionKey, sortKey } = bootstrap.metadata;
-    const rowKey = getRowKey(itemKey, bootstrap.metadata);
+  function toggleDelete(item: Record<string, unknown>): void {
+    const rowKey = getRowKey(item, bootstrap.metadata);
     if (loading) {
       return;
     }
@@ -452,12 +456,13 @@
     clearSavedMessage();
     if (rowKey in pendingDeletes) {
       pendingDeletes = omitKey(pendingDeletes, rowKey);
-    } else if (partitionKey.type === "B" || sortKey?.type === "B") {
-      requestError = "Deleting items with binary keys is not supported.";
     } else {
       // The delete wins over any edits staged on the row.
       clearRowEditingState(rowKey);
-      pendingDeletes = { ...pendingDeletes, [rowKey]: itemKey };
+      pendingDeletes = {
+        ...pendingDeletes,
+        [rowKey]: buildPrimaryKeyRecord(bootstrap.metadata, item),
+      };
     }
   }
 
@@ -815,10 +820,7 @@
           {invalidCellKeys}
           on:updateCellDraft={handleUpdateCellDraft}
           deletedRows={deletedRowKeys}
-          on:deleteRow={(event) =>
-            toggleDelete(
-              buildPrimaryKeyRecord(bootstrap.metadata, event.detail.item),
-            )}
+          on:deleteRow={(event) => toggleDelete(event.detail.item)}
         />
       {:else}
         <div class="empty-state">

@@ -334,8 +334,9 @@ export function buildItemKey(
 }
 
 // The existence condition makes a delete of a missing item fail instead of
-// silently succeeding. Keys that cannot be sent back exactly are refused:
-// binary keys, and numbers beyond what a JavaScript number holds exactly.
+// silently succeeding. Binary keys reach the extension host as the same
+// Uint8Array the item was read with. Number keys beyond what a JavaScript
+// number holds exactly cannot be sent back exactly and are refused.
 export function buildDeleteItemInput(
   metadata: TableMetadata,
   itemKey: Record<string, unknown>,
@@ -344,6 +345,9 @@ export function buildDeleteItemInput(
     const value = itemKey[key.name];
     if (key.type === "S" && typeof value === "string") {
       return { S: value };
+    }
+    if (key.type === "B" && value instanceof Uint8Array) {
+      return { B: value };
     }
     if (key.type === "N" && typeof value === "number") {
       const digits = String(value).replace(/e.*$|[-.]/gu, "");
@@ -357,9 +361,7 @@ export function buildDeleteItemInput(
       }
     }
     throw new Error(
-      key.type === "B"
-        ? "Deleting items with binary keys is not supported."
-        : `Key "${key.name}" cannot be sent back exactly, so the item cannot be deleted from here.`,
+      `Key "${key.name}" cannot be sent back exactly, so the item cannot be deleted from here.`,
     );
   };
 

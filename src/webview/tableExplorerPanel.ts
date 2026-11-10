@@ -110,12 +110,10 @@ export class TableExplorerPanel implements vscode.Disposable {
     TableExplorerPanel.activePanel = explorerPanel;
   }
 
-  public static requestDeleteForActivePanel(
-    itemKey: Record<string, unknown>,
-  ): boolean {
+  public static requestDeleteForActivePanel(rowKey: string): boolean {
     return TableExplorerPanel.requestForActivePanel({
       type: "deleteRequested",
-      itemKey,
+      rowKey,
     });
   }
 
